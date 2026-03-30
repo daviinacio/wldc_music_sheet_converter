@@ -1,0 +1,5 @@
+- [ ] Read MIDI file
+- [ ] List all voices
+  - Allow user to select the voices
+- [ ] Export to `.dcms` (Digital Clock Music Sheet) file
+  - Allow user to choose between human readable (with the defines) or numbers only.

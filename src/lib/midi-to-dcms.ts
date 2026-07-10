@@ -2,8 +2,6 @@ import type { IMidiFile } from "midi-json-parser-worker";
 
 // ── DCMS Constants (mirror of base.h) ──────────────────────────────────
 
-const WHOLE_NOTE_TIMING_TICKS = 64;
-
 const DCMS = {
   MUSIC_END: 0,
   MUSIC_BPM: 21,
@@ -75,19 +73,18 @@ interface DurationEntry {
 }
 
 const DURATION_TABLE: DurationEntry[] = [
-  // Dotted (longest first for greedy matching)
+  // Sorted by ticks descending — standard before dotted at comparable sizes
   { ticks: 96, value: DCMS.WHOLE_NOTE_DOTTED, name: "WHOLE_NOTE_DOTTED", restName: "WHOLE_REST_DOTTED" },
-  { ticks: 48, value: DCMS.HALF_NOTE_DOTTED, name: "HALF_NOTE_DOTTED", restName: "HALF_REST_DOTTED" },
-  { ticks: 24, value: DCMS.QUARTER_NOTE_DOTTED, name: "QUARTER_NOTE_DOTTED", restName: "QUARTER_REST_DOTTED" },
-  { ticks: 12, value: DCMS.EIGHTH_NOTE_DOTTED, name: "EIGHTH_NOTE_DOTTED", restName: "EIGHTH_REST_DOTTED" },
-  { ticks: 6, value: DCMS.SIXTEENTH_NOTE_DOTTED, name: "SIXTEENTH_NOTE_DOTTED", restName: "SIXTEENTH_REST_DOTTED" },
-  { ticks: 3, value: DCMS.THIRTY_SECOND_NOTE_DOTTED, name: "THIRTY_SECOND_NOTE_DOTTED", restName: "THIRTY_SECOND_REST_DOTTED" },
-  // Standard
   { ticks: 64, value: DCMS.WHOLE_NOTE, name: "WHOLE_NOTE", restName: "WHOLE_REST" },
+  { ticks: 48, value: DCMS.HALF_NOTE_DOTTED, name: "HALF_NOTE_DOTTED", restName: "HALF_REST_DOTTED" },
   { ticks: 32, value: DCMS.HALF_NOTE, name: "HALF_NOTE", restName: "HALF_REST" },
+  { ticks: 24, value: DCMS.QUARTER_NOTE_DOTTED, name: "QUARTER_NOTE_DOTTED", restName: "QUARTER_REST_DOTTED" },
   { ticks: 16, value: DCMS.QUARTER_NOTE, name: "QUARTER_NOTE", restName: "QUARTER_REST" },
+  { ticks: 12, value: DCMS.EIGHTH_NOTE_DOTTED, name: "EIGHTH_NOTE_DOTTED", restName: "EIGHTH_REST_DOTTED" },
   { ticks: 8, value: DCMS.EIGHTH_NOTE, name: "EIGHTH_NOTE", restName: "EIGHTH_REST" },
+  { ticks: 6, value: DCMS.SIXTEENTH_NOTE_DOTTED, name: "SIXTEENTH_NOTE_DOTTED", restName: "SIXTEENTH_REST_DOTTED" },
   { ticks: 4, value: DCMS.SIXTEENTH_NOTE, name: "SIXTEENTH_NOTE", restName: "SIXTEENTH_REST" },
+  { ticks: 3, value: DCMS.THIRTY_SECOND_NOTE_DOTTED, name: "THIRTY_SECOND_NOTE_DOTTED", restName: "THIRTY_SECOND_REST_DOTTED" },
   { ticks: 2, value: DCMS.THIRTY_SECOND_NOTE, name: "THIRTY_SECOND_NOTE", restName: "THIRTY_SECOND_REST" },
   { ticks: 1, value: DCMS.SIXTY_FOURTH_NOTE, name: "SIXTY_FOURTH_NOTE", restName: "SIXTY_FOURTH_REST" },
 ];
@@ -110,10 +107,11 @@ interface NoteEvent {
 const DCMS_REPEAT = {
   REPEAT_START: 30,
   REPEAT_END: 31,
+  REPEAT_ENDING: 32,
 } as const;
 
 interface DcmsToken {
-  type: "note" | "rest" | "meta" | "repeat_start" | "repeat_end" | "end";
+  type: "note" | "rest" | "meta" | "repeat_start" | "repeat_end" | "repeat_ending" | "separator" | "end";
   values: number[];    // numeric DCMS values
   label: string;       // human-readable define string
   indent?: number;     // nesting level for formatting
@@ -139,18 +137,19 @@ export function analyzeMidi(midi: IMidiFile): {
     let channel: number | null = null;
 
     for (const event of track) {
-      if ("trackName" in event && event.trackName) {
-        name = event.trackName;
+      const ev = event as any;
+      if (ev.trackName) {
+        name = ev.trackName;
       }
-      if ("setTempo" in event && event.setTempo) {
-        bpm = Math.round(60_000_000 / event.setTempo.microsecondsPerQuarter);
+      if (ev.setTempo) {
+        bpm = Math.round(60_000_000 / ev.setTempo.microsecondsPerQuarter);
       }
-      if ("timeSignature" in event && event.timeSignature) {
-        beats = event.timeSignature.numerator;
+      if (ev.timeSignature) {
+        beats = ev.timeSignature.numerator;
       }
-      if ("noteOn" in event && event.noteOn && event.noteOn.velocity > 0) {
+      if (ev.noteOn && ev.noteOn.velocity > 0) {
         noteCount++;
-        if (channel === null) channel = event.channel;
+        if (channel === null) channel = ev.channel;
       }
     }
 
@@ -170,34 +169,35 @@ function extractNotes(track: IMidiFile["tracks"][number]): NoteEvent[] {
   let absoluteTick = 0;
 
   for (const event of track) {
-    absoluteTick += event.delta;
+    const ev = event as any;
+    absoluteTick += ev.delta;
 
-    if ("noteOn" in event && event.noteOn) {
-      if (event.noteOn.velocity > 0) {
-        activeNotes.set(event.noteOn.noteNumber, absoluteTick);
+    if (ev.noteOn) {
+      if (ev.noteOn.velocity > 0) {
+        activeNotes.set(ev.noteOn.noteNumber, absoluteTick);
       } else {
         // velocity 0 = note off
-        const start = activeNotes.get(event.noteOn.noteNumber);
+        const start = activeNotes.get(ev.noteOn.noteNumber);
         if (start !== undefined) {
           notes.push({
-            noteNumber: event.noteOn.noteNumber,
+            noteNumber: ev.noteOn.noteNumber,
             startTick: start,
             durationTicks: absoluteTick - start,
           });
-          activeNotes.delete(event.noteOn.noteNumber);
+          activeNotes.delete(ev.noteOn.noteNumber);
         }
       }
     }
 
-    if ("noteOff" in event && event.noteOff) {
-      const start = activeNotes.get(event.noteOff.noteNumber);
+    if (ev.noteOff) {
+      const start = activeNotes.get(ev.noteOff.noteNumber);
       if (start !== undefined) {
         notes.push({
-          noteNumber: event.noteOff.noteNumber,
+          noteNumber: ev.noteOff.noteNumber,
           startTick: start,
           durationTicks: absoluteTick - start,
         });
-        activeNotes.delete(event.noteOff.noteNumber);
+        activeNotes.delete(ev.noteOff.noteNumber);
       }
     }
   }
@@ -312,6 +312,17 @@ function trackToDcmsTokens(
   }
 
   let currentTick = 0;
+  const measureTicks = 64; // 1 whole note in DCMS ticks
+  let measureAccum = 0;
+
+  const emitToken = (token: DcmsToken, ticks: number) => {
+    tokens.push(token);
+    measureAccum += ticks;
+    if (measureAccum >= measureTicks) {
+      measureAccum -= measureTicks;
+      tokens.push({ type: "separator", values: [], label: "" });
+    }
+  };
 
   for (const note of notes) {
     const startDcms = midiTicksToDcmsTicks(note.startTick, division);
@@ -321,22 +332,12 @@ function trackToDcmsTokens(
     const gap = startDcms - currentTick;
     if (gap > 0) {
       const restParts = decomposeDuration(gap);
-      for (let i = 0; i < restParts.length; i++) {
-        const part = restParts[i];
-        if (i === 0) {
-          tokens.push({
-            type: "rest",
-            values: [DCMS.REST_NOTE, part.value],
-            label: part.restName,
-          });
-        } else {
-          // Tied rest (rare but correct)
-          tokens.push({
-            type: "rest",
-            values: [DCMS.REST_NOTE, part.value],
-            label: part.restName,
-          });
-        }
+      for (const part of restParts) {
+        emitToken({
+          type: "rest",
+          values: [DCMS.REST_NOTE, part.value],
+          label: part.restName,
+        }, part.ticks);
       }
     }
 
@@ -350,17 +351,17 @@ function trackToDcmsTokens(
       const needsTie = !isLast;
 
       if (needsTie) {
-        tokens.push({
+        emitToken({
           type: "note",
           values: [pitchValue, octave, part.value, DCMS.TIE],
           label: `${noteName},  ${part.name}_TIE`,
-        });
+        }, part.ticks);
       } else {
-        tokens.push({
+        emitToken({
           type: "note",
           values: [pitchValue, octave, part.value],
           label: `${noteName},  ${part.name}`,
-        });
+        }, part.ticks);
       }
     }
 
@@ -422,7 +423,6 @@ function splitIntoMeasures(body: DcmsToken[], measureTicks: number): DcmsToken[]
 }
 
 function applyRepeatDetection(tokens: DcmsToken[], beats: number): DcmsToken[] {
-  // Separate header, body, and end
   const header: DcmsToken[] = [];
   const body: DcmsToken[] = [];
   let end: DcmsToken | null = null;
@@ -430,10 +430,10 @@ function applyRepeatDetection(tokens: DcmsToken[], beats: number): DcmsToken[] {
   for (const t of tokens) {
     if (t.type === "meta") header.push(t);
     else if (t.type === "end") end = t;
-    else body.push(t);
+    else if (t.type !== "separator") body.push(t);
   }
 
-  const measureTicks = beats * 16; // quarter note = 16 DCMS ticks
+  const measureTicks = beats * 16;
   const compressed = compressRepeats(body, measureTicks, 0);
 
   const result = [...header, ...compressed];
@@ -443,56 +443,196 @@ function applyRepeatDetection(tokens: DcmsToken[], beats: number): DcmsToken[] {
 
 const MAX_REPEAT_DEPTH = 10;
 
+// ── Helpers ───────────────────────────────────────────────────────────
+
+function measureTokenBytes(measures: DcmsToken[][], start: number, count: number): number {
+  let bytes = 0;
+  for (let m = start; m < start + count && m < measures.length; m++) {
+    for (const t of measures[m]) bytes += t.values.length;
+  }
+  return bytes;
+}
+
+function flattenMeasures(measures: DcmsToken[][], start: number, count: number): DcmsToken[] {
+  const tokens: DcmsToken[] = [];
+  for (let m = start; m < start + count && m < measures.length; m++) {
+    for (const t of measures[m]) tokens.push(t);
+  }
+  return tokens;
+}
+
+// ── Exact repeat detection ────────────────────────────────────────────
+
+interface ExactRepeatMatch {
+  patternLen: number;
+  count: number;
+  saving: number;
+}
+
+function findBestExactRepeat(
+  measures: DcmsToken[][],
+  startIdx: number,
+  measureFps: string[],
+): ExactRepeatMatch | null {
+  const remaining = measures.length - startIdx;
+  let best: ExactRepeatMatch | null = null;
+
+  for (let patLen = Math.floor(remaining / 2); patLen >= 1; patLen--) {
+    let count = 1;
+
+    while (startIdx + (count + 1) * patLen <= measures.length) {
+      let matches = true;
+      for (let m = 0; m < patLen; m++) {
+        if (measureFps[startIdx + m] !== measureFps[startIdx + count * patLen + m]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) count++;
+      else break;
+    }
+
+    if (count >= 2) {
+      const patternBytes = measureTokenBytes(measures, startIdx, patLen);
+      const saving = (count - 1) * patternBytes - 3; // REPEAT_START(2) + REPEAT_END(1)
+
+      if (saving > 0 && (!best || saving > best.saving)) {
+        best = { patternLen: patLen, count, saving };
+      }
+    }
+  }
+
+  return best;
+}
+
+// ── Near-repeat detection (REPEAT_ENDING / volta brackets) ────────────
+
+interface EndingGroup {
+  iterations: number[];    // 1-indexed iteration numbers
+  startMeasureIdx: number; // index into the measures array for this ending's content
+}
+
+interface NearRepeatMatch {
+  blockLen: number;
+  count: number;
+  prefixLen: number;
+  endings: EndingGroup[];
+  saving: number;
+}
+
+function findBestNearRepeat(
+  measures: DcmsToken[][],
+  startIdx: number,
+  measureFps: string[],
+): NearRepeatMatch | null {
+  const remaining = measures.length - startIdx;
+  let best: NearRepeatMatch | null = null;
+
+  for (let blockLen = Math.floor(remaining / 2); blockLen >= 2; blockLen--) {
+    for (let count = Math.floor(remaining / blockLen); count >= 2; count--) {
+      if (startIdx + count * blockLen > measures.length) continue;
+
+      // Find common prefix length across all blocks
+      let prefixLen = 0;
+      for (let m = 0; m < blockLen; m++) {
+        const refFp = measureFps[startIdx + m];
+        let allMatch = true;
+        for (let b = 1; b < count; b++) {
+          if (measureFps[startIdx + b * blockLen + m] !== refFp) {
+            allMatch = false;
+            break;
+          }
+        }
+        if (allMatch) prefixLen++;
+        else break;
+      }
+
+      // Skip exact repeats (handled by findBestExactRepeat) and no-prefix cases
+      if (prefixLen === blockLen || prefixLen < 1) continue;
+
+      const endingLen = blockLen - prefixLen;
+
+      // Group identical endings together (e.g., REPEAT_ENDING, 2, 3)
+      const endingFps: string[] = [];
+      for (let b = 0; b < count; b++) {
+        const parts: string[] = [];
+        for (let m = 0; m < endingLen; m++) {
+          parts.push(measureFps[startIdx + b * blockLen + prefixLen + m]);
+        }
+        endingFps.push(parts.join("||"));
+      }
+
+      const groups: EndingGroup[] = [];
+      const seen = new Map<string, number>();
+      for (let b = 0; b < count; b++) {
+        const fp = endingFps[b];
+        const existing = seen.get(fp);
+        if (existing !== undefined) {
+          groups[existing].iterations.push(b + 1);
+        } else {
+          seen.set(fp, groups.length);
+          groups.push({
+            iterations: [b + 1],
+            startMeasureIdx: startIdx + b * blockLen + prefixLen,
+          });
+        }
+      }
+
+      // Calculate byte savings
+      const originalBytes = measureTokenBytes(measures, startIdx, count * blockLen);
+      const prefixBytes = measureTokenBytes(measures, startIdx, prefixLen);
+
+      let endingsBytes = 0;
+      let endingsOverhead = 0;
+      for (const group of groups) {
+        endingsBytes += measureTokenBytes(measures, group.startMeasureIdx, endingLen);
+        endingsOverhead += 1 + group.iterations.length; // REPEAT_ENDING byte + iteration indices
+      }
+
+      const overhead = 3 + endingsOverhead; // REPEAT_START(2) + REPEAT_END(1) + ending markers
+      const compressedBytes = prefixBytes + endingsBytes + overhead;
+      const saving = originalBytes - compressedBytes;
+
+      if (saving > 0 && (!best || saving > best.saving)) {
+        best = { blockLen, count, prefixLen, endings: groups, saving };
+      }
+    }
+  }
+
+  return best;
+}
+
+// ── Main compression (recursive, handles exact + near-repeat) ─────────
+
 function compressRepeats(body: DcmsToken[], measureTicks: number, depth: number): DcmsToken[] {
   if (depth > MAX_REPEAT_DEPTH) return body;
 
   const measures = splitIntoMeasures(body, measureTicks);
-
   if (measures.length < 2) return body;
+
+  // Precompute fingerprints for each measure
+  const measureFps = measures.map((m) => tokensFingerprint(m));
 
   const result: DcmsToken[] = [];
   let i = 0;
 
   while (i < measures.length) {
-    let bestPatternLen = 0;
-    let bestRepeatCount = 0;
+    const exact = findBestExactRepeat(measures, i, measureFps);
+    const near = findBestNearRepeat(measures, i, measureFps);
 
-    // Greedy: try pattern sizes from large to small
-    for (let patLen = Math.floor((measures.length - i) / 2); patLen >= 1; patLen--) {
-      const patternFp = measuresRangeFingerprint(measures, i, patLen);
-      let count = 1;
+    // Pick whichever saves more bytes
+    const useNear = near && (!exact || near.saving > exact.saving);
+    const useExact = exact && !useNear;
 
-      while (i + (count + 1) * patLen <= measures.length) {
-        const nextFp = measuresRangeFingerprint(measures, i + count * patLen, patLen);
-        if (nextFp === patternFp) {
-          count++;
-        } else {
-          break;
-        }
-      }
-
-      if (count >= 2 && count * patLen > bestRepeatCount * bestPatternLen) {
-        bestPatternLen = patLen;
-        bestRepeatCount = count;
-      }
-    }
-
-    if (bestRepeatCount >= 2) {
-      // Collect the pattern body tokens (one copy)
-      const patternTokens: DcmsToken[] = [];
-      for (let m = 0; m < bestPatternLen; m++) {
-        for (const token of measures[i + m]) {
-          patternTokens.push(token);
-        }
-      }
-
-      // Recursively compress the pattern body for nested repeats
+    if (useExact && exact) {
+      const { patternLen, count } = exact;
+      const patternTokens = flattenMeasures(measures, i, patternLen);
       const innerTokens = compressRepeats(patternTokens, measureTicks, depth + 1);
 
       result.push({
         type: "repeat_start",
-        values: [DCMS_REPEAT.REPEAT_START, bestRepeatCount],
-        label: `REPEAT_START, ${bestRepeatCount}`,
+        values: [DCMS_REPEAT.REPEAT_START, count],
+        label: `REPEAT_START, ${count}`,
       });
 
       for (const token of innerTokens) {
@@ -505,9 +645,53 @@ function compressRepeats(body: DcmsToken[], measureTicks: number, depth: number)
         label: "REPEAT_END",
       });
 
-      i += bestRepeatCount * bestPatternLen;
+      i += count * patternLen;
+    } else if (useNear && near) {
+      const { blockLen, count, prefixLen, endings } = near;
+      const endingLen = blockLen - prefixLen;
+
+      // Recursively compress the common prefix
+      const prefixTokens = flattenMeasures(measures, i, prefixLen);
+      const compressedPrefix = compressRepeats(prefixTokens, measureTicks, depth + 1);
+
+      result.push({
+        type: "repeat_start",
+        values: [DCMS_REPEAT.REPEAT_START, count],
+        label: `REPEAT_START, ${count}`,
+      });
+
+      // Emit common prefix (plays every iteration)
+      for (const token of compressedPrefix) {
+        result.push({ ...token, indent: (token.indent ?? 0) + 1 });
+      }
+
+      // Emit each ending group with REPEAT_ENDING marker
+      for (const group of endings) {
+        result.push({
+          type: "repeat_ending",
+          values: [DCMS_REPEAT.REPEAT_ENDING, ...group.iterations],
+          label: `REPEAT_ENDING, ${group.iterations.join(", ")}`,
+          indent: 1,
+        });
+
+        // Recursively compress the ending content
+        const endingTokens = flattenMeasures(measures, group.startMeasureIdx, endingLen);
+        const compressedEnding = compressRepeats(endingTokens, measureTicks, depth + 1);
+
+        for (const token of compressedEnding) {
+          result.push({ ...token, indent: (token.indent ?? 0) + 1 });
+        }
+      }
+
+      result.push({
+        type: "repeat_end",
+        values: [DCMS_REPEAT.REPEAT_END],
+        label: "REPEAT_END",
+      });
+
+      i += count * blockLen;
     } else {
-      // No repeat found, emit measure as-is
+      // No repeat found — emit measure as-is
       for (const token of measures[i]) {
         result.push(token);
       }
@@ -516,14 +700,6 @@ function compressRepeats(body: DcmsToken[], measureTicks: number, depth: number)
   }
 
   return result;
-}
-
-function measuresRangeFingerprint(measures: DcmsToken[][], start: number, len: number): string {
-  const parts: string[] = [];
-  for (let m = 0; m < len; m++) {
-    parts.push(tokensFingerprint(measures[start + m]));
-  }
-  return parts.join("||");
 }
 
 // ── Public: Convert MIDI to HPP string ─────────────────────────────────
@@ -582,11 +758,16 @@ export function convertMidiToHpp(midi: IMidiFile, options: ConvertOptions): Conv
     lines.push(`static const uint8_t ${voiceName}[] PROGMEM = {`);
 
     for (const token of tokens) {
+      if (token.type === "separator") {
+        lines.push("");
+        continue;
+      }
+
       const indent = "  " + "  ".repeat(token.indent ?? 0);
       const content = useDefines ? token.label : token.values.join(", ");
       const comma = token.type === "end" ? "" : ",";
 
-      if (token.type === "repeat_start" || token.type === "repeat_end") {
+      if (token.type === "repeat_start" || token.type === "repeat_end" || token.type === "repeat_ending") {
         lines.push(`${indent}${content},`);
       } else {
         lines.push(`${indent}${content}${comma}`);

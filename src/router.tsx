@@ -5,7 +5,7 @@ const HomePage = lazy(() => import("@/view/Home"));
 
 export function AppRouter() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
       <Routes>
         <Route index element={<HomePage />} />
       </Routes>

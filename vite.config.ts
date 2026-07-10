@@ -5,6 +5,7 @@ import { defineConfig } from "vite";
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: "/wldc_music_sheet_converter/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

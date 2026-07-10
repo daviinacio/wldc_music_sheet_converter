@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { type MidiTrackInfo } from "@/lib/midi-to-dcms";
 import { useMidiConverter } from "@/lib/use-midi-converter";
 import * as MidiJsonParser from "midi-json-parser";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import type { IMidiFile } from "midi-json-parser-worker";
 import {
   UploadIcon,
@@ -38,17 +38,27 @@ export default function HomePage() {
     useMidiConverter();
 
   const hppOutput = convertResult?.hpp ?? "";
+  const deferredHppOutput = useDeferredValue(hppOutput);
 
-  // Trigger conversion when inputs change (debounced via worker)
+  // Trigger conversion when inputs change (debounced)
+  const convertTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
   useEffect(() => {
     if (!midiFile || !analysis || selectedTracks.size === 0) return;
-    convert(
-      midiFile,
-      songName || "untitled",
-      Array.from(selectedTracks),
-      exportMode === "defines",
-      detectRepeats,
-    );
+
+    if (convertTimeoutRef.current) clearTimeout(convertTimeoutRef.current);
+    convertTimeoutRef.current = setTimeout(() => {
+      convert(
+        midiFile,
+        songName || "untitled",
+        Array.from(selectedTracks),
+        exportMode === "defines",
+        detectRepeats,
+      );
+    }, 150);
+
+    return () => {
+      if (convertTimeoutRef.current) clearTimeout(convertTimeoutRef.current);
+    };
   }, [midiFile, analysis, selectedTracks, songName, exportMode, detectRepeats, convert]);
 
   const handleFile = useCallback(
@@ -405,12 +415,12 @@ export default function HomePage() {
               )}
             </div>
             <Badge variant="secondary" className="text-xs">
-              {hppOutput ? `${hppOutput.split("\n").length} lines` : "---"}
+              {deferredHppOutput ? `${deferredHppOutput.split("\n").length} lines` : "---"}
             </Badge>
           </div>
           <ScrollArea className="flex-1" fitContainer>
             <pre className="p-6 text-sm font-mono leading-relaxed whitespace-pre text-foreground/90">
-              {hppOutput || (
+              {deferredHppOutput || (
                 <span className="text-muted-foreground italic">
                   {selectedTracks.size === 0
                     ? "Select at least one track to preview the output"
@@ -427,7 +437,7 @@ export default function HomePage() {
 
 // ── Track item component ───────────────────────────────────────────────
 
-function TrackItem({
+const TrackItem = memo(function TrackItem({
   track,
   selected,
   onToggle,
@@ -465,4 +475,4 @@ function TrackItem({
       </Badge>
     </li>
   );
-}
+});

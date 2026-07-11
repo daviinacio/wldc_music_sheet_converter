@@ -34,7 +34,11 @@ Per selected track, in order:
 - `trackToDcmsTokens()` — emits `DcmsToken`s: notes, rests (for gaps), TIE-linked durations. `decomposeDuration()` breaks any duration into standard/dotted note values from `DURATION_TABLE`, chaining them with `TIE` when a single note spans multiple table entries. The header (`MUSIC_BPM`, `MUSIC_BEATS`) is emitted only on the first voice.
 - `applyRepeatDetection()` (optional) — `compressRepeats()` splits the body into measures (`beats * 16` ticks each) and recursively finds **exact repeats** (`REPEAT_START`/`REPEAT_END`) and **near-repeats / volta brackets** (`REPEAT_ENDING`). Both candidates are scored by actual byte savings and the larger win is chosen. Recursion is bounded by `MAX_REPEAT_DEPTH`.
 
-Every `DcmsToken` carries both `values` (numeric bytes) and `label` (human-readable `#define` name). The final serialization picks one based on the export mode ("With #defines" vs "Numbers only"). **Byte counts = sum of `values.length` across tokens** — each DCMS value is one `uint8_t`.
+Every `DcmsToken` carries both `values` (numeric bytes) and `label` (human-readable `#define` name). The final serialization picks one based on the export mode ("With #defines" vs "Numbers only"). **Per-voice byte count = sum of `values.length` across that voice's tokens** — each DCMS value is one `uint8_t`. The returned `totalBytes` adds the trailing voice-**pointer array** (`const uint8_t* const <name>[]`), which costs `(voiceCount + 1) * 2` bytes (2 per AVR pointer, plus the `music_sheet_end` terminator).
+
+A couple of lossy/formatting details that aren't obvious from the format alone:
+- `midiNoteToDcms()` **clamps octave to 1–7** — MIDI notes outside that range are silently pulled in-range.
+- `trackToDcmsTokens()` emits `separator` tokens (blank lines) on a fixed **64-tick (whole-note) accumulator** for visual grouping only. This is independent of the `beats * 16` measure grid that `compressRepeats()` uses for repeat detection — don't conflate the two.
 
 ### The DCMS format
 

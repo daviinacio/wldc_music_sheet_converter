@@ -711,10 +711,30 @@ export interface ConvertOptions {
   detectRepeats: boolean;
 }
 
+// A single emitted output line, tagged with its absolute line number in the
+// final `.hpp` text so the audio player can highlight it while playing.
+export interface PlaybackRow {
+  line: number; // 0-based index into hpp.split("\n")
+  type: DcmsToken["type"];
+  values: number[];
+}
+
+export interface PlaybackVoice {
+  name: string;
+  rows: PlaybackRow[];
+}
+
+export interface PlaybackData {
+  voices: PlaybackVoice[];
+  bpm: number;
+  beats: number;
+}
+
 export interface ConvertResult {
   hpp: string;
   totalBytes: number;
   bytesPerVoice: { name: string; bytes: number }[];
+  playback: PlaybackData;
 }
 
 export function convertMidiToHpp(midi: IMidiFile, options: ConvertOptions): ConvertResult {
@@ -735,6 +755,7 @@ export function convertMidiToHpp(midi: IMidiFile, options: ConvertOptions): Conv
 
   const voiceNames: string[] = [];
   const bytesPerVoice: { name: string; bytes: number }[] = [];
+  const playbackVoices: PlaybackVoice[] = [];
 
   const filteredTracks = tracks.filter((t) => selectedTracks.includes(t.index));
 
@@ -755,6 +776,7 @@ export function convertMidiToHpp(midi: IMidiFile, options: ConvertOptions): Conv
     const voiceBytes = tokens.reduce((sum, t) => sum + t.values.length, 0);
     bytesPerVoice.push({ name: trackInfo.name, bytes: voiceBytes });
 
+    const rows: PlaybackRow[] = [];
     lines.push(`static const uint8_t ${voiceName}[] PROGMEM = {`);
 
     for (const token of tokens) {
@@ -767,12 +789,17 @@ export function convertMidiToHpp(midi: IMidiFile, options: ConvertOptions): Conv
       const content = useDefines ? token.label : token.values.join(", ");
       const comma = token.type === "end" ? "" : ",";
 
+      // Absolute line number of the line we're about to push.
+      rows.push({ line: lines.length, type: token.type, values: token.values });
+
       if (token.type === "repeat_start" || token.type === "repeat_end" || token.type === "repeat_ending") {
         lines.push(`${indent}${content},`);
       } else {
         lines.push(`${indent}${content}${comma}`);
       }
     }
+
+    playbackVoices.push({ name: trackInfo.name, rows });
 
     lines.push(`};`);
     lines.push("");
@@ -796,5 +823,6 @@ export function convertMidiToHpp(midi: IMidiFile, options: ConvertOptions): Conv
     hpp: lines.join("\n"),
     totalBytes,
     bytesPerVoice,
+    playback: { voices: playbackVoices, bpm, beats },
   };
 }

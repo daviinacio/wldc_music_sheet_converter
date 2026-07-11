@@ -5,8 +5,10 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { type MidiTrackInfo } from "@/lib/midi-to-dcms";
 import { useMidiConverter } from "@/lib/use-midi-converter";
+import { useDcmsPlayer } from "@/lib/use-dcms-player";
+import type { DcmsPlayer } from "@/lib/dcms-player";
 import * as MidiJsonParser from "midi-json-parser";
-import { memo, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { IMidiFile } from "midi-json-parser-worker";
 import {
   UploadIcon,
@@ -17,6 +19,9 @@ import {
   CheckIcon,
   XIcon,
   Loader2Icon,
+  PlayIcon,
+  PauseIcon,
+  SquareIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -30,7 +35,7 @@ export default function HomePage() {
   const [songName, setSongName] = useState("");
   const [selectedTracks, setSelectedTracks] = useState<Set<number>>(new Set());
   const [exportMode, setExportMode] = useState<ExportMode>("defines");
-  const [detectRepeats, setDetectRepeats] = useState(false);
+  const [detectRepeats, setDetectRepeats] = useState(true);
   const [copied, setCopied] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -39,6 +44,10 @@ export default function HomePage() {
 
   const hppOutput = convertResult?.hpp ?? "";
   const deferredHppOutput = useDeferredValue(hppOutput);
+
+  // Audio preview player (plays the DCMS output polyphonically)
+  const { player, playing, time, duration, toggle, stop, seek } =
+    useDcmsPlayer(convertResult?.playback);
 
   // Trigger conversion when inputs change (debounced)
   const convertTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
@@ -418,21 +427,133 @@ export default function HomePage() {
               {deferredHppOutput ? `${deferredHppOutput.split("\n").length} lines` : "---"}
             </Badge>
           </div>
-          <ScrollArea className="flex-1" fitContainer>
-            <pre className="p-6 text-sm font-mono leading-relaxed whitespace-pre text-foreground/90">
-              {deferredHppOutput || (
-                <span className="text-muted-foreground italic">
-                  {selectedTracks.size === 0
-                    ? "Select at least one track to preview the output"
-                    : "Converting..."}
-                </span>
+
+          {/* Transport bar */}
+          <div className="px-6 py-2 border-b flex items-center gap-3">
+            <Button
+              size="icon-sm"
+              variant="default"
+              onClick={toggle}
+              disabled={!player || duration === 0}
+              title={playing ? "Pause" : "Play"}
+            >
+              {playing ? (
+                <PauseIcon className="size-4" />
+              ) : (
+                <PlayIcon className="size-4" />
               )}
-            </pre>
+            </Button>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              onClick={stop}
+              disabled={!player || duration === 0}
+              title="Stop"
+            >
+              <SquareIcon className="size-4" />
+            </Button>
+
+            <span className="text-xs font-mono text-muted-foreground tabular-nums w-10 text-right">
+              {formatTime(time)}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={duration || 0}
+              step={0.01}
+              value={Math.min(time, duration || 0)}
+              onChange={(e) => seek(Number(e.target.value))}
+              disabled={!player || duration === 0}
+              className="flex-1 accent-primary h-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            />
+            <span className="text-xs font-mono text-muted-foreground tabular-nums w-10">
+              {formatTime(duration)}
+            </span>
+          </div>
+
+          <ScrollArea className="flex-1" fitContainer>
+            {deferredHppOutput ? (
+              <HighlightedOutput text={deferredHppOutput} player={player} />
+            ) : (
+              <pre className="p-6 text-sm font-mono leading-relaxed whitespace-pre text-muted-foreground italic">
+                {selectedTracks.size === 0
+                  ? "Select at least one track to preview the output"
+                  : "Converting..."}
+              </pre>
+            )}
           </ScrollArea>
         </main>
       </div>
     </div>
   );
+}
+
+// ── Output preview with live line highlighting ─────────────────────────
+
+// Tailwind class toggled imperatively on the sounding line(s). Kept as a
+// literal so Tailwind's scanner emits it.
+const HL_CLASS = "bg-primary/25";
+
+const HighlightedOutput = memo(function HighlightedOutput({
+  text,
+  player,
+}: {
+  text: string;
+  player: DcmsPlayer | null;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const lines = useMemo(() => text.split("\n"), [text]);
+
+  // Highlight active lines imperatively (per animation frame) so the whole
+  // output list doesn't re-render at 60fps. Each line is one direct child, so
+  // its index matches the absolute line number the player reports.
+  useEffect(() => {
+    if (!player) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    let prev: Element[] = [];
+    const unsub = player.addListener((u) => {
+      for (const el of prev) el.classList.remove(HL_CLASS);
+      const next: Element[] = [];
+      u.activeLines.forEach((i) => {
+        const el = container.children[i];
+        if (el) {
+          el.classList.add(HL_CLASS);
+          next.push(el);
+        }
+      });
+      prev = next;
+    });
+
+    return () => {
+      unsub();
+      for (const el of prev) el.classList.remove(HL_CLASS);
+    };
+  }, [player, lines]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="py-4 text-sm font-mono leading-relaxed text-foreground/90"
+    >
+      {lines.map((line, i) => (
+        <div
+          key={i}
+          className="px-6 whitespace-pre transition-colors duration-100 min-h-[1.5em]"
+        >
+          {line === "" ? " " : line}
+        </div>
+      ))}
+    </div>
+  );
+});
+
+function formatTime(sec: number): string {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 // ── Track item component ───────────────────────────────────────────────

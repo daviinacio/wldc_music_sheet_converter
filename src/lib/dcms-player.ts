@@ -10,6 +10,12 @@ import type { PlaybackData, PlaybackRow } from "./midi-to-dcms";
 // ── DCMS constants (mirror of base.h) ──────────────────────────────────
 const REST_NOTE = 70;
 const TIE = 40;
+const SLUR = 41;
+
+// How a note connects to the following note:
+//  - "tie"  → same pitch, held as one sustained tone
+//  - "slur" → glide (portamento) into the next pitch, played legato
+type Connector = "tie" | "slur" | null;
 
 // DCMS pitch value (101..112) → semitone offset above C.
 const SEMITONE_FROM_C: Record<number, number> = {
@@ -50,7 +56,7 @@ function durationTicks(value: number): number {
 // ── Structural parse: rows → nested repeat tree ────────────────────────
 
 type PlayNode =
-  | { kind: "event"; line: number; midi: number | null; ticks: number; tie: boolean }
+  | { kind: "event"; line: number; midi: number | null; ticks: number; connector: Connector }
   | { kind: "repeat"; count: number; prefix: PlayNode[]; endings: { iters: number[]; content: PlayNode[] }[] };
 
 interface RepeatFrame {
@@ -91,13 +97,15 @@ function parseVoice(rows: PlaybackRow[]): PlayNode[] {
       }
       case "note": {
         const midi = dcmsToMidi(v[0], v[1]);
-        current().push({ kind: "event", line: row.line, midi, ticks: durationTicks(v[2]), tie: v[v.length - 1] === TIE });
+        const last = v[v.length - 1];
+        const connector: Connector = last === TIE ? "tie" : last === SLUR ? "slur" : null;
+        current().push({ kind: "event", line: row.line, midi, ticks: durationTicks(v[2]), connector });
         break;
       }
       case "rest": {
         // values: [REST_NOTE, duration]
         if (v[0] === REST_NOTE) {
-          current().push({ kind: "event", line: row.line, midi: null, ticks: durationTicks(v[1]), tie: false });
+          current().push({ kind: "event", line: row.line, midi: null, ticks: durationTicks(v[1]), connector: null });
         }
         break;
       }
@@ -115,7 +123,7 @@ export interface FlatEvent {
   midi: number | null; // null = rest
   startTick: number;
   ticks: number;
-  tie: boolean;
+  connector: Connector; // link to the following note (tie/slur), if any
 }
 
 function flatten(nodes: PlayNode[]): FlatEvent[] {
@@ -125,7 +133,7 @@ function flatten(nodes: PlayNode[]): FlatEvent[] {
   const run = (list: PlayNode[]) => {
     for (const n of list) {
       if (n.kind === "event") {
-        out.push({ line: n.line, midi: n.midi, startTick: tick, ticks: n.ticks, tie: n.tie });
+        out.push({ line: n.line, midi: n.midi, startTick: tick, ticks: n.ticks, connector: n.connector });
         tick += n.ticks;
       } else {
         for (let it = 1; it <= n.count; it++) {
@@ -151,52 +159,77 @@ export interface VoiceTimeline {
   events: FlatEvent[]; // sorted by startTick
 }
 
-interface AudioNote {
-  midi: number;
+// A frequency waypoint within a phrase. `glide` = ramp (portamento) from the
+// previous waypoint; otherwise the pitch steps instantly.
+interface FreqPoint {
+  timeSec: number;
+  freq: number;
+  glide: boolean;
+}
+
+// A legato run of notes played by one oscillator: notes joined by TIE (same
+// pitch, held) or SLUR (glide to the next pitch). A plain note is a phrase of one.
+interface AudioPhrase {
   startSec: number;
   endSec: number;
+  points: FreqPoint[];
 }
 
 export interface Timeline {
   voices: VoiceTimeline[];
-  audioNotes: AudioNote[];
+  phrases: AudioPhrase[];
   durationSec: number;
   secondsPerTick: number;
 }
 
 export function buildTimeline(playback: PlaybackData): Timeline {
   const bpm = playback.bpm || 120;
-  // quarter note = 1 beat = 16 DCMS ticks
-  const secondsPerTick = 60 / (bpm * 16);
+  const beats = playback.beats || 4;
+  // Match the firmware (MusicPlayer::update_interval): a whole note lasts one
+  // measure, i.e. `beats × (60/bpm)` seconds — NOT a fixed 4 beats. Our whole
+  // note is 64 DCMS ticks, so secondsPerTick = beats × (60/bpm) / 64.
+  // (Reduces to the plain 60/(bpm×16) when beats = 4.)
+  const secondsPerTick = (60 * beats) / (bpm * 64);
 
   const voices: VoiceTimeline[] = [];
-  const audioNotes: AudioNote[] = [];
+  const phrases: AudioPhrase[] = [];
   let maxTick = 0;
 
   playback.voices.forEach((voice, vi) => {
     const events = flatten(parseVoice(voice.rows));
     voices.push({ voiceIndex: vi, name: voice.name, events });
 
-    // Merge TIE-linked runs of the same pitch into a single sustained tone.
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
       const end = ev.startTick + ev.ticks;
       if (end > maxTick) maxTick = end;
-      if (ev.midi === null) continue;
+      if (ev.midi === null) continue; // rest: no audio
 
+      // Grow a legato phrase across TIE/SLUR connectors.
+      const points: FreqPoint[] = [{ timeSec: ev.startTick * secondsPerTick, freq: midiToFreq(ev.midi), glide: false }];
       let j = i;
-      let runEnd = end;
-      while (events[j].tie && j + 1 < events.length && events[j + 1].midi === ev.midi) {
+      while (events[j].connector && j + 1 < events.length && events[j + 1].midi !== null) {
+        const connector = events[j].connector;
+        const next = events[j + 1];
+        const nextFreq = midiToFreq(next.midi!);
+        // TIE holds the pitch (only emit a step if the pitch actually changes);
+        // SLUR glides into the next pitch.
+        if (connector === "slur") {
+          points.push({ timeSec: next.startTick * secondsPerTick, freq: nextFreq, glide: true });
+        } else if (next.midi !== events[j].midi) {
+          points.push({ timeSec: next.startTick * secondsPerTick, freq: nextFreq, glide: false });
+        }
         j++;
-        runEnd = events[j].startTick + events[j].ticks;
       }
-      audioNotes.push({ midi: ev.midi, startSec: ev.startTick * secondsPerTick, endSec: runEnd * secondsPerTick });
+
+      const runEnd = events[j].startTick + events[j].ticks;
       if (runEnd > maxTick) maxTick = runEnd;
+      phrases.push({ startSec: points[0].timeSec, endSec: runEnd * secondsPerTick, points });
       i = j;
     }
   });
 
-  return { voices, audioNotes, durationSec: maxTick * secondsPerTick, secondsPerTick };
+  return { voices, phrases, durationSec: maxTick * secondsPerTick, secondsPerTick };
 }
 
 // Line currently sounding in a voice at time `cur` (seconds), or null.
@@ -282,32 +315,59 @@ export class DcmsPlayer {
     this.stopNodes();
     this.t0 = ctx.currentTime - this.offset;
 
-    for (const n of this.timeline.audioNotes) {
-      if (n.endSec <= this.offset) continue;
-      const startAt = this.t0 + Math.max(this.offset, n.startSec);
-      const endAt = this.t0 + n.endSec;
-
-      const osc = ctx.createOscillator();
-      osc.type = "triangle";
-      osc.frequency.value = midiToFreq(n.midi);
-
-      const gain = ctx.createGain();
-      const peak = 0.22;
-      const releaseStart = Math.max(startAt + 0.006, endAt - 0.03);
-      gain.gain.setValueAtTime(0, startAt);
-      gain.gain.linearRampToValueAtTime(peak, startAt + 0.006);
-      gain.gain.setValueAtTime(peak, releaseStart);
-      gain.gain.linearRampToValueAtTime(0, endAt);
-
-      osc.connect(gain);
-      gain.connect(this.master!);
-      osc.start(startAt);
-      osc.stop(endAt + 0.02);
-      this.nodes.push({ osc, gain });
+    for (const phrase of this.timeline.phrases) {
+      if (phrase.endSec <= this.offset) continue;
+      this.schedulePhrase(ctx, phrase);
     }
 
     this._playing = true;
     this.loop();
+  }
+
+  private schedulePhrase(ctx: AudioContext, phrase: AudioPhrase) {
+    const start = Math.max(this.offset, phrase.startSec);
+    const startAt = this.t0 + start;
+    const endAt = this.t0 + phrase.endSec;
+
+    const osc = ctx.createOscillator();
+    osc.type = "triangle";
+
+    const gain = ctx.createGain();
+    const peak = 0.22;
+    const releaseStart = Math.max(startAt + 0.006, endAt - 0.03);
+    gain.gain.setValueAtTime(0, startAt);
+    gain.gain.linearRampToValueAtTime(peak, startAt + 0.006);
+    gain.gain.setValueAtTime(peak, releaseStart);
+    gain.gain.linearRampToValueAtTime(0, endAt);
+
+    // Frequency automation. A SLUR glides linearly from the note's pitch to the
+    // next note's, spanning that whole note (matches the firmware's
+    // calc_current_frequency). A TIE/plain boundary steps instantly. When
+    // seeking mid-phrase, begin at whichever waypoint is active at `start`.
+    const points = phrase.points;
+    let curFreq = points[0].freq;
+    for (const p of points) {
+      if (p.timeSec <= start) curFreq = p.freq;
+    }
+    osc.frequency.setValueAtTime(curFreq, startAt);
+
+    for (const p of points) {
+      if (p.timeSec <= start) continue;
+      const at = this.t0 + p.timeSec;
+      if (p.glide) {
+        // Ramp spans from the previous waypoint's time to this one — i.e. the
+        // full duration of the note being slurred.
+        osc.frequency.linearRampToValueAtTime(p.freq, at);
+      } else {
+        osc.frequency.setValueAtTime(p.freq, at);
+      }
+    }
+
+    osc.connect(gain);
+    gain.connect(this.master!);
+    osc.start(startAt);
+    osc.stop(endAt + 0.02);
+    this.nodes.push({ osc, gain });
   }
 
   private loop = () => {

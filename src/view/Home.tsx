@@ -3,9 +3,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { type MidiTrackInfo } from "@/lib/midi-to-dcms";
+import { type MidiTrackInfo, type PlaybackData } from "@/lib/midi-to-dcms";
 import { useMidiConverter } from "@/lib/use-midi-converter";
 import { useDcmsPlayer } from "@/lib/use-dcms-player";
+import { parseHppToPlayback } from "@/lib/parse-hpp";
 import type { DcmsPlayer } from "@/lib/dcms-player";
 import * as MidiJsonParser from "midi-json-parser";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
@@ -39,15 +40,23 @@ export default function HomePage() {
   const [copied, setCopied] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
+  // Set when the user opens a .hpp file directly (play-only mode, no conversion)
+  const [hppFile, setHppFile] = useState<{
+    name: string;
+    text: string;
+    playback: PlaybackData;
+  } | null>(null);
+
   const { analysis, convertResult, isConverting, analyze, convert } =
     useMidiConverter();
 
   const hppOutput = convertResult?.hpp ?? "";
   const deferredHppOutput = useDeferredValue(hppOutput);
 
-  // Audio preview player (plays the DCMS output polyphonically)
+  // Audio preview player — plays the DCMS output polyphonically. Source is
+  // either the live conversion or a directly-opened .hpp file.
   const { player, playing, time, duration, toggle, stop, seek } =
-    useDcmsPlayer(convertResult?.playback);
+    useDcmsPlayer(hppFile ? hppFile.playback : convertResult?.playback);
 
   // Trigger conversion when inputs change (debounced)
   const convertTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
@@ -73,6 +82,14 @@ export default function HomePage() {
   const handleFile = useCallback(
     async (file: File) => {
       const ext = file.name.split(".").pop()?.toLowerCase();
+
+      // Open a DCMS .hpp file directly → play-only mode (no MIDI conversion)
+      if (ext === "hpp" || ext === "h") {
+        const text = await file.text();
+        setHppFile({ name: file.name, text, playback: parseHppToPlayback(text) });
+        return;
+      }
+
       if (ext !== "mid" && ext !== "midi") return;
 
       const midi = await MidiJsonParser.parseArrayBuffer(
@@ -151,7 +168,69 @@ export default function HomePage() {
     setFileName("");
     setSongName("");
     setSelectedTracks(new Set());
+    setHppFile(null);
   }, []);
+
+  // ── .hpp play-only screen ────────────────────────────────────────────
+
+  if (hppFile) {
+    const { voices, bpm, beats } = hppFile.playback;
+    return (
+      <div className="h-screen bg-background flex flex-col overflow-hidden">
+        <header className="border-b px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Music2Icon className="size-5 text-primary" />
+            <h1 className="font-semibold text-lg">DCMS Player</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="gap-1.5">
+              <FileCodeIcon className="size-3" />
+              {hppFile.name}
+            </Badge>
+            <Button variant="ghost" size="icon-sm" onClick={handleClear}>
+              <XIcon className="size-4" />
+            </Button>
+          </div>
+        </header>
+
+        {/* Metadata */}
+        <div className="px-6 py-2 border-b flex flex-wrap gap-x-5 gap-y-1 text-sm">
+          <div>
+            <span className="text-muted-foreground">BPM: </span>
+            <span className="font-medium">{bpm}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">Beats: </span>
+            <span className="font-medium">{beats}/4</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">Voices: </span>
+            <span className="font-medium">{voices.length}</span>
+          </div>
+        </div>
+
+        <TransportBar
+          player={player}
+          playing={playing}
+          time={time}
+          duration={duration}
+          toggle={toggle}
+          stop={stop}
+          seek={seek}
+        />
+
+        <ScrollArea className="flex-1" fitContainer>
+          {voices.length > 0 ? (
+            <HighlightedOutput text={hppFile.text} player={player} />
+          ) : (
+            <pre className="p-6 text-sm font-mono leading-relaxed whitespace-pre text-muted-foreground italic">
+              No playable voices found in this file.
+            </pre>
+          )}
+        </ScrollArea>
+      </div>
+    );
+  }
 
   // ── Upload screen ────────────────────────────────────────────────────
 
@@ -176,7 +255,7 @@ export default function HomePage() {
           <input
             ref={inputRef}
             type="file"
-            accept=".mid,.midi"
+            accept=".mid,.midi,.hpp,.h"
             className="hidden"
             onChange={handleInputChange}
           />
@@ -205,16 +284,17 @@ export default function HomePage() {
                 {midiFile && !analysis
                   ? "Analyzing..."
                   : isDragging
-                    ? "Drop MIDI file here"
-                    : "Upload MIDI file"}
+                    ? "Drop file here"
+                    : "Upload MIDI or DCMS file"}
               </h2>
               <p className="text-sm text-muted-foreground mt-1">
-                Drag & drop or click to select a <strong>.mid</strong> file
+                Drag & drop or click to select a <strong>.mid</strong> to
+                convert, or a <strong>.hpp</strong> to play
               </p>
             </div>
 
             <Badge variant="secondary" className="text-xs">
-              .mid / .midi
+              .mid / .midi / .hpp
             </Badge>
           </div>
         </div>
@@ -428,48 +508,15 @@ export default function HomePage() {
             </Badge>
           </div>
 
-          {/* Transport bar */}
-          <div className="px-6 py-2 border-b flex items-center gap-3">
-            <Button
-              size="icon-sm"
-              variant="default"
-              onClick={toggle}
-              disabled={!player || duration === 0}
-              title={playing ? "Pause" : "Play"}
-            >
-              {playing ? (
-                <PauseIcon className="size-4" />
-              ) : (
-                <PlayIcon className="size-4" />
-              )}
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              onClick={stop}
-              disabled={!player || duration === 0}
-              title="Stop"
-            >
-              <SquareIcon className="size-4" />
-            </Button>
-
-            <span className="text-xs font-mono text-muted-foreground tabular-nums w-10 text-right">
-              {formatTime(time)}
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={duration || 0}
-              step={0.01}
-              value={Math.min(time, duration || 0)}
-              onChange={(e) => seek(Number(e.target.value))}
-              disabled={!player || duration === 0}
-              className="flex-1 accent-primary h-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-            />
-            <span className="text-xs font-mono text-muted-foreground tabular-nums w-10">
-              {formatTime(duration)}
-            </span>
-          </div>
+          <TransportBar
+            player={player}
+            playing={playing}
+            time={time}
+            duration={duration}
+            toggle={toggle}
+            stop={stop}
+            seek={seek}
+          />
 
           <ScrollArea className="flex-1" fitContainer>
             {deferredHppOutput ? (
@@ -487,6 +534,61 @@ export default function HomePage() {
     </div>
   );
 }
+
+// ── Transport bar ──────────────────────────────────────────────────────
+
+const TransportBar = memo(function TransportBar({
+  player,
+  playing,
+  time,
+  duration,
+  toggle,
+  stop,
+  seek,
+}: {
+  player: DcmsPlayer | null;
+  playing: boolean;
+  time: number;
+  duration: number;
+  toggle: () => void;
+  stop: () => void;
+  seek: (sec: number) => void;
+}) {
+  const disabled = !player || duration === 0;
+  return (
+    <div className="px-6 py-2 border-b flex items-center gap-3">
+      <Button
+        size="icon-sm"
+        variant="default"
+        onClick={toggle}
+        disabled={disabled}
+        title={playing ? "Pause" : "Play"}
+      >
+        {playing ? <PauseIcon className="size-4" /> : <PlayIcon className="size-4" />}
+      </Button>
+      <Button size="icon-sm" variant="ghost" onClick={stop} disabled={disabled} title="Stop">
+        <SquareIcon className="size-4" />
+      </Button>
+
+      <span className="text-xs font-mono text-muted-foreground tabular-nums w-10 text-right">
+        {formatTime(time)}
+      </span>
+      <input
+        type="range"
+        min={0}
+        max={duration || 0}
+        step={0.01}
+        value={Math.min(time, duration || 0)}
+        onChange={(e) => seek(Number(e.target.value))}
+        disabled={disabled}
+        className="flex-1 accent-primary h-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+      />
+      <span className="text-xs font-mono text-muted-foreground tabular-nums w-10">
+        {formatTime(duration)}
+      </span>
+    </div>
+  );
+});
 
 // ── Output preview with live line highlighting ─────────────────────────
 

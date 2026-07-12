@@ -634,6 +634,9 @@ const HighlightedOutput = memo(function HighlightedOutput({
     };
   }, [player, lines]);
 
+  // Gutter wide enough for the highest line number.
+  const digits = String(lines.length).length;
+
   return (
     <div
       ref={containerRef}
@@ -642,9 +645,18 @@ const HighlightedOutput = memo(function HighlightedOutput({
       {lines.map((line, i) => (
         <div
           key={i}
-          className="px-6 whitespace-pre transition-colors duration-100 min-h-[1.5em]"
+          className="flex transition-colors duration-100 min-h-[1.5em]"
         >
-          {line === "" ? " " : line}
+          <span
+            aria-hidden
+            className="select-none shrink-0 pr-4 text-right tabular-nums text-muted-foreground/40"
+            style={{ width: `calc(${digits}ch + 2.5rem)` }}
+          >
+            {i + 1}
+          </span>
+          <span className="whitespace-pre pr-6">
+            {line === "" ? " " : line}
+          </span>
         </div>
       ))}
     </div>

@@ -173,6 +173,7 @@ interface AudioPhrase {
   startSec: number;
   endSec: number;
   points: FreqPoint[];
+  hasGap: boolean; // firmware mutes the tail of a non-tied/slurred note (articulation)
 }
 
 export interface Timeline {
@@ -224,7 +225,9 @@ export function buildTimeline(playback: PlaybackData): Timeline {
 
       const runEnd = events[j].startTick + events[j].ticks;
       if (runEnd > maxTick) maxTick = runEnd;
-      phrases.push({ startSec: points[0].timeSec, endSec: runEnd * secondsPerTick, points });
+      // The phrase's final note articulates (gap) unless it's tied/slurred onward.
+      const hasGap = !events[j].connector;
+      phrases.push({ startSec: points[0].timeSec, endSec: runEnd * secondsPerTick, points, hasGap });
       i = j;
     }
   });
@@ -327,7 +330,12 @@ export class DcmsPlayer {
   private schedulePhrase(ctx: AudioContext, phrase: AudioPhrase) {
     const start = Math.max(this.offset, phrase.startSec);
     const startAt = this.t0 + start;
-    const endAt = this.t0 + phrase.endSec;
+    // Articulation gap: the firmware mutes the last tick (1 firmware tick =
+    // secondsPerTick/2) of a non-tied/slurred note, so rapid runs of short
+    // notes stay distinct instead of blurring into one tone. The gap shortens
+    // only the AUDIO — the on-screen highlight still spans the full note.
+    const gapSec = phrase.hasGap ? this.timeline.secondsPerTick / 2 : 0;
+    const endAt = Math.max(startAt + 0.01, this.t0 + phrase.endSec - gapSec);
 
     const osc = ctx.createOscillator();
     osc.type = "triangle";

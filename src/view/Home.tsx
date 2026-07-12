@@ -7,8 +7,8 @@ import { type MidiTrackInfo, type PlaybackData } from "@/lib/midi-to-dcms";
 import { useMidiConverter } from "@/lib/use-midi-converter";
 import { useDcmsPlayer } from "@/lib/use-dcms-player";
 import { parseHppToPlayback } from "@/lib/parse-hpp";
+import { parseMidiArrayBuffer } from "@/lib/parse-midi";
 import type { DcmsPlayer } from "@/lib/dcms-player";
-import * as MidiJsonParser from "midi-json-parser";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { IMidiFile } from "midi-json-parser-worker";
 import {
@@ -36,9 +36,10 @@ export default function HomePage() {
   const [songName, setSongName] = useState("");
   const [selectedTracks, setSelectedTracks] = useState<Set<number>>(new Set());
   const [exportMode, setExportMode] = useState<ExportMode>("defines");
-  const [detectRepeats, setDetectRepeats] = useState(true);
+  const [detectRepeats, setDetectRepeats] = useState(false);
   const [copied, setCopied] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
 
   // Set when the user opens a .hpp file directly (play-only mode, no conversion)
   const [hppFile, setHppFile] = useState<{
@@ -82,6 +83,7 @@ export default function HomePage() {
   const handleFile = useCallback(
     async (file: File) => {
       const ext = file.name.split(".").pop()?.toLowerCase();
+      setFileError(null);
 
       // Open a DCMS .hpp file directly → play-only mode (no MIDI conversion)
       if (ext === "hpp" || ext === "h") {
@@ -90,17 +92,24 @@ export default function HomePage() {
         return;
       }
 
-      if (ext !== "mid" && ext !== "midi") return;
+      if (ext !== "mid" && ext !== "midi") {
+        setFileError("Unsupported file. Please choose a .mid, .midi, or .hpp file.");
+        return;
+      }
 
-      const midi = await MidiJsonParser.parseArrayBuffer(
-        await file.arrayBuffer(),
-      );
-      setMidiFile(midi);
-      setFileName(file.name);
-      setSongName(file.name.replace(/\.(mid|midi)$/i, ""));
+      try {
+        const midi = parseMidiArrayBuffer(await file.arrayBuffer());
+        setMidiFile(midi);
+        setFileName(file.name);
+        setSongName(file.name.replace(/\.(mid|midi)$/i, ""));
 
-      // Analyze in the worker — auto-select all tracks once done
-      analyze(midi);
+        // Analyze in the worker — auto-select all tracks once done
+        analyze(midi);
+      } catch (err) {
+        setFileError(
+          `Could not read "${file.name}": ${err instanceof Error ? err.message : "invalid MIDI file"}`,
+        );
+      }
     },
     [analyze],
   );
@@ -296,6 +305,10 @@ export default function HomePage() {
             <Badge variant="secondary" className="text-xs">
               .mid / .midi / .hpp
             </Badge>
+
+            {fileError && (
+              <p className="text-sm text-destructive max-w-sm">{fileError}</p>
+            )}
           </div>
         </div>
       </div>

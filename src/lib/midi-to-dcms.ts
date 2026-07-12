@@ -1,4 +1,5 @@
 import type { IMidiFile } from "midi-json-parser-worker";
+import { generalMidiName, GM_PERCUSSION_CHANNEL } from "./general-midi";
 
 // ── DCMS Constants (mirror of base.h) ──────────────────────────────────
 
@@ -91,11 +92,15 @@ const DURATION_TABLE: DurationEntry[] = [
 
 // ── Types ──────────────────────────────────────────────────────────────
 
+// A "voice" is a unique (MIDI track, channel) pair that has notes. Format-0
+// files put every instrument in one track on separate channels, so splitting by
+// channel is what surfaces them as distinct voices.
 export interface MidiTrackInfo {
-  index: number;
+  index: number; // unique voice id (selection/UI key)
+  trackIndex: number; // raw MIDI track this voice comes from
+  channel: number | null; // MIDI channel to keep (null = whole track)
   name: string;
   noteCount: number;
-  channel: number | null;
 }
 
 interface NoteEvent {
@@ -129,17 +134,18 @@ export function analyzeMidi(midi: IMidiFile): {
   let beats = 4;
 
   const tracks: MidiTrackInfo[] = [];
+  let voiceId = 0;
 
   for (let i = 0; i < midi.tracks.length; i++) {
     const track = midi.tracks[i];
-    let name = `Track ${i + 1}`;
-    let noteCount = 0;
-    let channel: number | null = null;
+    let trackName = "";
+    const notesPerChannel = new Map<number, number>();
+    const programPerChannel = new Map<number, number>(); // first patch seen per channel
 
     for (const event of track) {
       const ev = event as any;
       if (ev.trackName) {
-        name = ev.trackName;
+        trackName = ev.trackName;
       }
       if (ev.setTempo) {
         bpm = Math.round(60_000_000 / ev.setTempo.microsecondsPerQuarter);
@@ -147,30 +153,66 @@ export function analyzeMidi(midi: IMidiFile): {
       if (ev.timeSignature) {
         beats = ev.timeSignature.numerator;
       }
+      if (ev.programChange) {
+        const ch = ev.channel ?? 0;
+        if (!programPerChannel.has(ch)) programPerChannel.set(ch, ev.programChange.programNumber);
+      }
       if (ev.noteOn && ev.noteOn.velocity > 0) {
-        noteCount++;
-        if (channel === null) channel = ev.channel;
+        const ch = ev.channel ?? 0;
+        notesPerChannel.set(ch, (notesPerChannel.get(ch) ?? 0) + 1);
       }
     }
 
-    if (noteCount > 0) {
-      tracks.push({ index: i, name, noteCount, channel });
+    // Emit one voice per channel that carries notes.
+    const channels = [...notesPerChannel.keys()].sort((a, b) => a - b);
+    for (const ch of channels) {
+      tracks.push({
+        index: voiceId++,
+        trackIndex: i,
+        channel: ch,
+        name: voiceName(trackName, channels.length, ch, programPerChannel.get(ch)),
+        noteCount: notesPerChannel.get(ch)!,
+      });
     }
   }
 
   return { tracks, bpm, beats, division: midi.division };
 }
 
+// Pick the clearest label for a voice. A single-channel track keeps its own
+// name; multi-channel (format-0) voices are named by their GM instrument, with
+// channel 10 always drums and a "Ch N" fallback when no patch is known.
+function voiceName(
+  trackName: string,
+  channelCount: number,
+  channel: number,
+  program: number | undefined,
+): string {
+  if (channelCount === 1 && trackName) return trackName;
+  if (channel === GM_PERCUSSION_CHANNEL) return "Drums";
+  if (program !== undefined) return generalMidiName(program);
+  if (trackName) return `${trackName} · Ch ${channel + 1}`;
+  return `Ch ${channel + 1}`;
+}
+
 // ── MIDI → Note Events ─────────────────────────────────────────────────
 
-function extractNotes(track: IMidiFile["tracks"][number]): NoteEvent[] {
+function extractNotes(
+  track: IMidiFile["tracks"][number],
+  channel: number | null,
+): NoteEvent[] {
   const notes: NoteEvent[] = [];
   const activeNotes = new Map<number, number>(); // noteNumber → startTick
   let absoluteTick = 0;
 
   for (const event of track) {
     const ev = event as any;
-    absoluteTick += ev.delta;
+    absoluteTick += ev.delta; // advance time for every event, even filtered ones
+
+    // Only this voice's channel contributes notes (format-0 = many channels).
+    if (channel !== null && ev.channel !== undefined && ev.channel !== channel) {
+      continue;
+    }
 
     if (ev.noteOn) {
       if (ev.noteOn.velocity > 0) {
@@ -761,7 +803,7 @@ export function convertMidiToHpp(midi: IMidiFile, options: ConvertOptions): Conv
 
   for (let vi = 0; vi < filteredTracks.length; vi++) {
     const trackInfo = filteredTracks[vi];
-    const rawNotes = extractNotes(midi.tracks[trackInfo.index]);
+    const rawNotes = extractNotes(midi.tracks[trackInfo.trackIndex], trackInfo.channel);
     const monoNotes = reduceToMonophonic(rawNotes);
     let tokens = trackToDcmsTokens(monoNotes, midi.division, bpm, beats, vi === 0);
 
